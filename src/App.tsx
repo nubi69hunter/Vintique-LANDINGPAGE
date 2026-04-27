@@ -1,11 +1,72 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
+import { supabase, type Listing } from './supabase';
+import type { User } from '@supabase/supabase-js';
+
+type View = 'home' | 'sell' | 'profile';
+type AuthModal = null | 'login' | 'signup';
+
+const CATEGORIES = ['Abayas', 'Casual', 'Bags', 'Shoes', 'Accessories', 'Outerwear', 'Other'];
+const CONDITIONS = ['New', 'Like New', 'Good', 'Fair'];
+const CATEGORY_EMOJI: Record<string, string> = {
+  Abayas: '👗', Casual: '👕', Bags: '👜', Shoes: '👠', Accessories: '🧣', Outerwear: '🧥', Other: '✨',
+};
 
 export default function App() {
   const cursorRef = useRef<HTMLDivElement>(null);
   const navRef = useRef<HTMLElement>(null);
 
+  // Auth
+  const [user, setUser] = useState<User | null>(null);
+  const [authModal, setAuthModal] = useState<AuthModal>(null);
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+
+  // View
+  const [view, setView] = useState<View>('home');
+
+  // Listings
+  const [listings, setListings] = useState<Listing[]>([]);
+  const [listingsLoading, setListingsLoading] = useState(true);
+
+  // Sell form
+  const [sellTitle, setSellTitle] = useState('');
+  const [sellDesc, setSellDesc] = useState('');
+  const [sellCategory, setSellCategory] = useState('');
+  const [sellSize, setSellSize] = useState('');
+  const [sellCondition, setSellCondition] = useState('');
+  const [sellPrice, setSellPrice] = useState('');
+  const [sellLoading, setSellLoading] = useState(false);
+  const [sellSuccess, setSellSuccess] = useState(false);
+  const [sellError, setSellError] = useState('');
+
+  // Buy
+  const [buyingId, setBuyingId] = useState<string | null>(null);
+  const [orderSuccess, setOrderSuccess] = useState<string | null>(null);
+
+  const fetchListings = useCallback(async () => {
+    setListingsLoading(true);
+    const { data, error } = await supabase
+      .from('listings')
+      .select('*')
+      .order('created_at', { ascending: false });
+    if (!error && data) setListings(data as Listing[]);
+    setListingsLoading(false);
+  }, []);
+
   useEffect(() => {
-    // Cursor handling
+    supabase.auth.getSession().then(({ data }) => {
+      setUser(data.session?.user ?? null);
+    });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+    });
+    fetchListings();
+    return () => subscription.unsubscribe();
+  }, [fetchListings]);
+
+  useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
       if (cursorRef.current) {
         cursorRef.current.style.left = e.clientX - 4 + 'px';
@@ -14,19 +75,13 @@ export default function App() {
     };
     document.addEventListener('mousemove', handleMouseMove);
 
-    // Scroll animations
     const observer = new IntersectionObserver((entries) => {
       entries.forEach(entry => {
-        if (entry.isIntersecting) {
-          entry.target.classList.add('visible');
-        }
+        if (entry.isIntersecting) entry.target.classList.add('visible');
       });
     }, { threshold: 0.15 });
+    document.querySelectorAll('.fade-up').forEach(el => observer.observe(el));
 
-    const fadeUpElems = document.querySelectorAll('.fade-up');
-    fadeUpElems.forEach(el => observer.observe(el));
-
-    // Nav scroll effect
     const handleScroll = () => {
       if (navRef.current) {
         if (window.scrollY > 60) {
@@ -38,414 +93,452 @@ export default function App() {
           navRef.current.style.background = 'transparent';
           navRef.current.style.backdropFilter = 'none';
           navRef.current.style.borderBottom = 'none';
-          navRef.current.style.mixBlendMode = 'multiply';
+          navRef.current.style.mixBlendMode = view === 'home' ? 'multiply' : 'normal';
         }
       }
     };
     window.addEventListener('scroll', handleScroll);
-
     return () => {
       document.removeEventListener('mousemove', handleMouseMove);
-      fadeUpElems.forEach(el => observer.unobserve(el));
       window.removeEventListener('scroll', handleScroll);
     };
-  }, []);
+  }, [view]);
+
+  const handleAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError('');
+    setAuthLoading(true);
+    if (authModal === 'signup') {
+      const { error } = await supabase.auth.signUp({ email: authEmail, password: authPassword });
+      if (error) { setAuthError(error.message); }
+      else {
+        setAuthModal(null);
+        setAuthEmail('');
+        setAuthPassword('');
+      }
+    } else {
+      const { error } = await supabase.auth.signInWithPassword({ email: authEmail, password: authPassword });
+      if (error) { setAuthError(error.message); }
+      else {
+        setAuthModal(null);
+        setAuthEmail('');
+        setAuthPassword('');
+      }
+    }
+    setAuthLoading(false);
+  };
+
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
+    setView('home');
+  };
+
+  const handleSell = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user) { setAuthModal('login'); return; }
+    setSellError('');
+    setSellLoading(true);
+    const { error } = await supabase.from('listings').insert({
+      seller_id: user.id,
+      title: sellTitle.trim(),
+      description: sellDesc.trim() || null,
+      category: sellCategory || null,
+      size: sellSize.trim() || null,
+      condition: sellCondition || null,
+      price: parseFloat(sellPrice),
+    });
+    if (error) {
+      setSellError(error.message);
+    } else {
+      setSellSuccess(true);
+      setSellTitle(''); setSellDesc(''); setSellCategory('');
+      setSellSize(''); setSellCondition(''); setSellPrice('');
+      fetchListings();
+      setTimeout(() => setSellSuccess(false), 4000);
+    }
+    setSellLoading(false);
+  };
+
+  const handleBuyNow = async (listing: Listing) => {
+    if (!user) { setAuthModal('login'); return; }
+    if (user.id === listing.seller_id) return;
+    setBuyingId(listing.id);
+    const { error } = await supabase.from('orders').insert({
+      listing_id: listing.id,
+      buyer_id: user.id,
+      seller_id: listing.seller_id,
+      status: 'pending',
+    });
+    setBuyingId(null);
+    if (!error) {
+      setOrderSuccess(listing.id);
+      setTimeout(() => setOrderSuccess(null), 5000);
+    }
+  };
+
+  const openView = (v: View) => {
+    if ((v === 'sell' || v === 'profile') && !user) {
+      setAuthModal('login');
+      return;
+    }
+    setView(v);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const userListings = listings.filter(l => l.seller_id === user?.id);
 
   return (
     <>
-      <div className="cursor" id="cursor" ref={cursorRef}></div>
+      <div className="cursor" ref={cursorRef}></div>
+
+      {/* AUTH MODAL */}
+      {authModal && (
+        <div className="modal-overlay" onClick={() => setAuthModal(null)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <button className="modal-close" onClick={() => setAuthModal(null)}>✕</button>
+            <div className="modal-logo">Vintique</div>
+            <div className="modal-tabs">
+              <button
+                className={`modal-tab${authModal === 'login' ? ' active' : ''}`}
+                onClick={() => { setAuthModal('login'); setAuthError(''); }}
+              >Login</button>
+              <button
+                className={`modal-tab${authModal === 'signup' ? ' active' : ''}`}
+                onClick={() => { setAuthModal('signup'); setAuthError(''); }}
+              >Sign Up</button>
+            </div>
+            <form onSubmit={handleAuth} className="modal-form">
+              <input
+                className="modal-input"
+                type="email"
+                placeholder="Email address"
+                value={authEmail}
+                onChange={e => setAuthEmail(e.target.value)}
+                required
+              />
+              <input
+                className="modal-input"
+                type="password"
+                placeholder="Password"
+                value={authPassword}
+                onChange={e => setAuthPassword(e.target.value)}
+                required
+                minLength={6}
+              />
+              {authError && <div className="modal-error">{authError}</div>}
+              <button className="btn-primary" type="submit" disabled={authLoading} style={{ width: '100%', marginTop: '0.5rem' }}>
+                {authLoading ? '...' : authModal === 'login' ? 'Login' : 'Create Account'}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* NAV */}
-      <nav ref={navRef}>
-        <a href="#" className="nav-logo">Vintique</a>
+      <nav ref={navRef} style={{ mixBlendMode: view === 'home' ? 'multiply' : 'normal', background: view !== 'home' ? 'rgba(245,240,232,0.95)' : 'transparent', backdropFilter: view !== 'home' ? 'blur(12px)' : 'none', borderBottom: view !== 'home' ? '1px solid rgba(0,0,0,0.08)' : 'none' }}>
+        <button className="nav-logo" onClick={() => setView('home')} style={{ background: 'none', border: 'none', cursor: 'pointer', fontFamily: 'inherit' }}>Vintique</button>
         <ul className="nav-links">
-          <li><a href="#how">How it works</a></li>
-          <li><a href="#opportunity">Market</a></li>
-          <li><a href="#tech">Technology</a></li>
-          <li><a href="#roadmap">Roadmap</a></li>
-          <li><a href="#contact">Contact</a></li>
+          <li><button className={`nav-btn${view === 'home' ? ' nav-active' : ''}`} onClick={() => setView('home')}>Browse</button></li>
+          <li><button className={`nav-btn${view === 'sell' ? ' nav-active' : ''}`} onClick={() => openView('sell')}>Sell</button></li>
+          <li><button className={`nav-btn${view === 'profile' ? ' nav-active' : ''}`} onClick={() => openView('profile')}>Profile</button></li>
         </ul>
+        <div className="nav-auth">
+          {user ? (
+            <>
+              <span className="nav-user">{user.email}</span>
+              <button className="btn-ghost" style={{ padding: '0.5rem 1.2rem', fontSize: '0.72rem' }} onClick={handleSignOut}>Logout</button>
+            </>
+          ) : (
+            <button className="btn-primary" style={{ padding: '0.6rem 1.4rem', fontSize: '0.72rem' }} onClick={() => setAuthModal('login')}>Login / Sign Up</button>
+          )}
+        </div>
       </nav>
 
-      {/* HERO */}
-      <section className="hero">
-        <div className="hero-left">
-          <div className="hero-tag">Saudi Arabia's First P2P Fashion Marketplace</div>
-          <h1 className="hero-title">
-            Pre-loved.<br/>
-            <em>Reworn.</em><br/>
-            Rewired.
-          </h1>
-          <p className="hero-desc">
-            Vintique is a peer-to-peer fashion resale marketplace built for Saudi Arabia — where anyone can buy and sell pre-loved clothing, safely and instantly.
-          </p>
-          <div className="hero-ctas">
-            <a href="#opportunity" className="btn-primary">See the opportunity</a>
-            <a href="#how" className="btn-ghost">How it works</a>
-          </div>
-        </div>
-        <div className="hero-right">
-          <div className="hero-mockup">
-            <div className="phone">
-              <div className="phone-notch"><div className="phone-notch-inner"></div></div>
-              <div className="phone-screen">
-                <div className="phone-header">
-                  <div className="phone-logo">Vintique</div>
-                  <div style={{ fontSize: '0.6rem', color: '#7A7268', letterSpacing: '0.05em' }}>Riyadh</div>
-                </div>
-                <div className="phone-search">
-                  <span>🔍</span>
-                  <span>Search pre-loved pieces...</span>
-                </div>
-                <div className="phone-cats">
-                  <div className="phone-cat active">All</div>
-                  <div className="phone-cat">Abayas</div>
-                  <div className="phone-cat">Casual</div>
-                  <div className="phone-cat">Bags</div>
-                </div>
-                <div className="phone-grid">
-                  <div className="phone-card">
-                    <div className="phone-badge">NEW</div>
-                    <div className="phone-card-img" style={{ background: '#d4c9b8' }}>👗</div>
-                    <div className="phone-card-info">
-                      <div className="phone-card-name">Vintage Abaya</div>
-                      <div className="phone-card-size">Size M · Like New</div>
-                      <div className="phone-card-price">120 SAR</div>
+      {/* ─── HOME / BROWSE VIEW ─── */}
+      {view === 'home' && (
+        <>
+          {/* HERO */}
+          <section className="hero">
+            <div className="hero-left">
+              <div className="hero-tag">Saudi Arabia's First P2P Fashion Marketplace</div>
+              <h1 className="hero-title">Pre-loved.<br/><em>Reworn.</em><br/>Rewired.</h1>
+              <p className="hero-desc">
+                Vintique is a peer-to-peer fashion resale marketplace built for Saudi Arabia — where anyone can buy and sell pre-loved clothing, safely and instantly.
+              </p>
+              <div className="hero-ctas">
+                <button className="btn-primary" onClick={() => { document.getElementById('listings-section')?.scrollIntoView({ behavior: 'smooth' }); }}>Browse listings</button>
+                <button className="btn-ghost" onClick={() => openView('sell')}>Sell now</button>
+              </div>
+            </div>
+            <div className="hero-right">
+              <div className="hero-mockup">
+                <div className="phone">
+                  <div className="phone-notch"><div className="phone-notch-inner"></div></div>
+                  <div className="phone-screen">
+                    <div className="phone-header">
+                      <div className="phone-logo">Vintique</div>
+                      <div style={{ fontSize: '0.6rem', color: '#7A7268', letterSpacing: '0.05em' }}>Riyadh</div>
                     </div>
-                  </div>
-                  <div className="phone-card">
-                    <div className="phone-card-img" style={{ background: '#c9bfb0' }}>👜</div>
-                    <div className="phone-card-info">
-                      <div className="phone-card-name">Leather Tote</div>
-                      <div className="phone-card-size">One size · Good</div>
-                      <div className="phone-card-price">85 SAR</div>
+                    <div className="phone-search"><span>🔍</span><span>Search pre-loved pieces...</span></div>
+                    <div className="phone-cats">
+                      <div className="phone-cat active">All</div>
+                      <div className="phone-cat">Abayas</div>
+                      <div className="phone-cat">Casual</div>
+                      <div className="phone-cat">Bags</div>
                     </div>
-                  </div>
-                  <div className="phone-card">
-                    <div className="phone-card-img" style={{ background: '#d8d0c4' }}>👠</div>
-                    <div className="phone-card-info">
-                      <div className="phone-card-name">Block Heels</div>
-                      <div className="phone-card-size">38 · Excellent</div>
-                      <div className="phone-card-price">200 SAR</div>
-                    </div>
-                  </div>
-                  <div className="phone-card">
-                    <div className="phone-badge">HOT</div>
-                    <div className="phone-card-img" style={{ background: '#cac2b6' }}>🧣</div>
-                    <div className="phone-card-info">
-                      <div className="phone-card-name">Silk Scarf</div>
-                      <div className="phone-card-size">One size · New</div>
-                      <div className="phone-card-price">65 SAR</div>
+                    <div className="phone-grid">
+                      {listings.slice(0, 4).map((l, i) => (
+                        <div className="phone-card" key={l.id}>
+                          {i === 0 && <div className="phone-badge">NEW</div>}
+                          <div className="phone-card-img" style={{ background: ['#d4c9b8','#c9bfb0','#d8d0c4','#cac2b6'][i] }}>
+                            {CATEGORY_EMOJI[l.category || ''] || '✨'}
+                          </div>
+                          <div className="phone-card-info">
+                            <div className="phone-card-name">{l.title}</div>
+                            <div className="phone-card-size">{[l.size, l.condition].filter(Boolean).join(' · ')}</div>
+                            <div className="phone-card-price">{l.price} SAR</div>
+                          </div>
+                        </div>
+                      ))}
+                      {listings.length === 0 && (
+                        <>
+                          {[{ n: 'Vintage Abaya', s: 'M · Like New', p: 120, bg: '#d4c9b8', e: '👗' },
+                            { n: 'Leather Tote', s: 'One size · Good', p: 85, bg: '#c9bfb0', e: '👜' },
+                            { n: 'Block Heels', s: '38 · Excellent', p: 200, bg: '#d8d0c4', e: '👠' },
+                            { n: 'Silk Scarf', s: 'One size · New', p: 65, bg: '#cac2b6', e: '🧣' }].map((c, i) => (
+                            <div className="phone-card" key={i}>
+                              {i === 0 && <div className="phone-badge">NEW</div>}
+                              {i === 3 && <div className="phone-badge">HOT</div>}
+                              <div className="phone-card-img" style={{ background: c.bg }}>{c.e}</div>
+                              <div className="phone-card-info">
+                                <div className="phone-card-name">{c.n}</div>
+                                <div className="phone-card-size">{c.s}</div>
+                                <div className="phone-card-price">{c.p} SAR</div>
+                              </div>
+                            </div>
+                          ))}
+                        </>
+                      )}
                     </div>
                   </div>
                 </div>
               </div>
             </div>
-          </div>
-        </div>
-      </section>
+          </section>
 
-      {/* MARQUEE */}
-      <div className="marquee-wrap">
-        <div className="marquee-track">
-          <div className="marquee-item">VINTAGE <span>✦</span> UNIQUE <span>✦</span> ANTIQUE <span>✦</span> PRE-LOVED <span>✦</span> SUSTAINABLE FASHION <span>✦</span> SAUDI ARABIA <span>✦</span> RESELL <span>✦</span> REWEAR <span>✦</span></div>
-          <div className="marquee-item">VINTAGE <span>✦</span> UNIQUE <span>✦</span> ANTIQUE <span>✦</span> PRE-LOVED <span>✦</span> SUSTAINABLE FASHION <span>✦</span> SAUDI ARABIA <span>✦</span> RESELL <span>✦</span> REWEAR <span>✦</span></div>
-        </div>
-      </div>
-
-      {/* STATS */}
-      <div className="stats">
-        <div className="stat fade-up">
-          <div className="stat-num">0<span className="stat-accent">*</span></div>
-          <div className="stat-label">Direct competitors in KSA</div>
-        </div>
-        <div className="stat fade-up" style={{ transitionDelay: '0.1s' }}>
-          <div className="stat-num">35<span className="stat-accent">M+</span></div>
-          <div className="stat-label">KSA population, 70% under 35</div>
-        </div>
-        <div className="stat fade-up" style={{ transitionDelay: '0.2s' }}>
-          <div className="stat-num">10<span className="stat-accent">%</span></div>
-          <div className="stat-label">Commission per transaction</div>
-        </div>
-        <div className="stat fade-up" style={{ transitionDelay: '0.3s' }}>
-          <div className="stat-num">~<span className="stat-accent">0</span></div>
-          <div className="stat-label">SAR build cost — self-built</div>
-        </div>
-      </div>
-
-      {/* HOW IT WORKS */}
-      <section className="section" id="how">
-        <div className="section-eyebrow">The flow</div>
-        <h2 className="section-title">How <em>Vintique</em> works</h2>
-        <div className="steps">
-          <div className="step fade-up">
-            <div className="step-num">01</div>
-            <div className="step-icon">📸</div>
-            <div className="step-title">List in 2 minutes</div>
-            <div className="step-desc">Snap photos, set your price, pick size and condition. Your item is live instantly.</div>
-          </div>
-          <div className="step fade-up" style={{ transitionDelay: '0.1s' }}>
-            <div className="step-num">02</div>
-            <div className="step-icon">💳</div>
-            <div className="step-title">Buyer pays securely</div>
-            <div className="step-desc">Payment via MADA, Apple Pay or Visa — held in escrow by Vintique until delivery confirmed.</div>
-          </div>
-          <div className="step fade-up" style={{ transitionDelay: '0.2s' }}>
-            <div className="step-num">03</div>
-            <div className="step-icon">📦</div>
-            <div className="step-title">Seller ships via Aramex</div>
-            <div className="step-desc">Generate a shipping label in-app. Book a home pickup. No trips to the post office.</div>
-          </div>
-          <div className="step fade-up" style={{ transitionDelay: '0.3s' }}>
-            <div className="step-num">04</div>
-            <div className="step-icon">💰</div>
-            <div className="step-title">Get paid</div>
-            <div className="step-desc">Buyer confirms delivery. Funds released to your Vintique wallet, transferred to your bank in 1-3 days.</div>
-          </div>
-        </div>
-      </section>
-
-      {/* OPPORTUNITY */}
-      <section className="opportunity" id="opportunity">
-        <div>
-          <div className="opp-eyebrow">The gap</div>
-          <h2 className="opp-title">A market <em>begging</em> for a solution</h2>
-          <p className="opp-desc">
-            Thrifting culture is exploding in Saudi Arabia. Gen Z is buying and selling pre-loved fashion on WhatsApp groups and Instagram DMs. It's chaotic, unsafe, and slow. No dedicated platform exists.
-          </p>
-          <div className="opp-points">
-            <div className="opp-point">
-              <div className="opp-point-dot"></div>
-              <div className="opp-point-text"><strong>Bazaara</strong> — the only regional P2P fashion app — was acquired in 2024 and exited the market entirely.</div>
-            </div>
-            <div className="opp-point">
-              <div className="opp-point-dot"></div>
-              <div className="opp-point-text"><strong>Haraj</strong> is too general, cluttered, and built for electronics not fashion.</div>
-            </div>
-            <div className="opp-point">
-              <div className="opp-point-dot"></div>
-              <div className="opp-point-text"><strong>AMUSED</strong> targets luxury only — excludes the everyday seller with a closet full of unworn clothes.</div>
-            </div>
-            <div className="opp-point">
-              <div className="opp-point-dot"></div>
-              <div className="opp-point-text">The window is <strong>open right now</strong>. First mover wins.</div>
+          {/* MARQUEE */}
+          <div className="marquee-wrap">
+            <div className="marquee-track">
+              <div className="marquee-item">VINTAGE <span>✦</span> UNIQUE <span>✦</span> ANTIQUE <span>✦</span> PRE-LOVED <span>✦</span> SUSTAINABLE FASHION <span>✦</span> SAUDI ARABIA <span>✦</span> RESELL <span>✦</span> REWEAR <span>✦</span></div>
+              <div className="marquee-item">VINTAGE <span>✦</span> UNIQUE <span>✦</span> ANTIQUE <span>✦</span> PRE-LOVED <span>✦</span> SUSTAINABLE FASHION <span>✦</span> SAUDI ARABIA <span>✦</span> RESELL <span>✦</span> REWEAR <span>✦</span></div>
             </div>
           </div>
-        </div>
-        <div className="opp-right">
-          <div className="competitor-card">
-            <div className="comp-name">Bazaara</div>
-            <div className="comp-status status-gone">Exited 2024</div>
-            <div className="comp-desc">UAE-based P2P fashion app that planned KSA expansion — acquired and shut down before it could.</div>
-          </div>
-          <div className="competitor-card">
-            <div className="comp-name">Haraj</div>
-            <div className="comp-status status-weak">Not fashion</div>
-            <div className="comp-desc">General classifieds with 50M+ monthly visitors — but zero fashion focus, trust issues, and poor UX.</div>
-          </div>
-          <div className="competitor-card">
-            <div className="comp-name">AMUSED</div>
-            <div className="comp-status status-weak">Luxury only</div>
-            <div className="comp-desc">Authenticated luxury pieces — great for Chanel bags, useless for everyday pre-loved clothing.</div>
-          </div>
-          <div className="vintique-card">
-            <div className="comp-name" style={{ color: '#F5F0E8' }}>Vintique</div>
-            <div className="comp-status status-us">Our play</div>
-            <div className="comp-desc" style={{ color: 'rgba(245,240,232,0.6)' }}>The only dedicated P2P fashion resale marketplace for everyday KSA sellers. First mover. Zero direct competition.</div>
-          </div>
-        </div>
-      </section>
 
-      {/* TRUST */}
-      <section className="trust section" id="trust">
-        <div className="section-eyebrow">Safety first</div>
-        <h2 className="section-title">Built on <em>trust</em></h2>
-        <div className="trust-grid">
-          <div className="trust-item fade-up">
-            <div className="trust-icon">🔒</div>
-            <div className="trust-title">Escrow payments</div>
-            <div className="trust-desc">Money is held by Vintique until the buyer confirms receipt. Sellers can't ghost. Buyers can't chargeback unfairly.</div>
-          </div>
-          <div className="trust-item fade-up" style={{ transitionDelay: '0.1s' }}>
-            <div className="trust-icon">⭐</div>
-            <div className="trust-title">Seller ratings</div>
-            <div className="trust-desc">Every completed transaction builds a seller's reputation. Bad actors get flagged fast. Good sellers get rewarded.</div>
-          </div>
-          <div className="trust-item fade-up" style={{ transitionDelay: '0.2s' }}>
-            <div className="trust-icon">🛡️</div>
-            <div className="trust-title">Buyer protection</div>
-            <div className="trust-desc">48-hour dispute window after delivery. Item not as described? You're covered. No questions asked.</div>
-          </div>
-        </div>
-      </section>
+          {/* LIVE LISTINGS */}
+          <section className="section listings-section" id="listings-section">
+            <div className="section-eyebrow">Live marketplace</div>
+            <h2 className="section-title">Browse <em>listings</em></h2>
 
-      {/* TECH */}
-      <section className="tech" id="tech">
-        <div className="section-eyebrow" style={{ color: 'var(--rust)' }}>Under the hood</div>
-        <h2 className="section-title" style={{ color: 'var(--cream)' }}>Lean, <em>scalable</em> tech</h2>
-        <div className="tech-grid">
-          <div className="tech-card fade-up">
-            <div className="tech-label">Mobile App</div>
-            <div className="tech-name">React Native</div>
-            <div className="tech-desc">iOS and Android from a single codebase. Built in-house. No agency, no bloat.</div>
-          </div>
-          <div className="tech-card fade-up" style={{ transitionDelay: '0.1s' }}>
-            <div className="tech-label">Backend</div>
-            <div className="tech-name">Supabase</div>
-            <div className="tech-desc">Auth, database, storage, and realtime messaging. Scales from day 1 to day 10,000.</div>
-          </div>
-          <div className="tech-card fade-up" style={{ transitionDelay: '0.2s' }}>
-            <div className="tech-label">Payments</div>
-            <div className="tech-name">Moyasar</div>
-            <div className="tech-desc">MADA, Apple Pay, Visa. SAMA-licensed. Escrow-ready for marketplace split payments.</div>
-          </div>
-          <div className="tech-card fade-up" style={{ transitionDelay: '0.3s' }}>
-            <div className="tech-label">Shipping</div>
-            <div className="tech-name">Aramex API</div>
-            <div className="tech-desc">Label generation and home pickup booking — all inside the app. No external redirects.</div>
-          </div>
-        </div>
-      </section>
-
-      {/* ROADMAP */}
-      <section className="roadmap section" id="roadmap">
-        <div className="section-eyebrow">The plan</div>
-        <h2 className="section-title">Road to <em>launch</em></h2>
-        <div className="timeline">
-          <div className="tl-item fade-up">
-            <div>
-              <div className="tl-phase">Phase 1</div>
-              <div className="tl-time">Week 1–2</div>
-            </div>
-            <div>
-              <div className="tl-title">Foundation & outreach</div>
-              <div className="tl-tasks">
-                <span className="tl-task">Register vintique.sa</span>
-                <span className="tl-task">Aramex API deal</span>
-                <span className="tl-task">Moyasar escrow confirmation</span>
-                <span className="tl-task">Wireframes</span>
+            {listingsLoading ? (
+              <div className="listings-loading">Loading listings...</div>
+            ) : listings.length === 0 ? (
+              <div className="listings-empty">
+                <div className="listings-empty-icon">👗</div>
+                <div className="listings-empty-title">No listings yet</div>
+                <div className="listings-empty-desc">Be the first to list something on Vintique.</div>
+                <button className="btn-primary" style={{ marginTop: '1.5rem' }} onClick={() => openView('sell')}>List an item</button>
               </div>
-            </div>
-          </div>
-          <div className="tl-item fade-up">
-            <div>
-              <div className="tl-phase">Phase 2</div>
-              <div className="tl-time">Month 1</div>
-            </div>
-            <div>
-              <div className="tl-title">Design & branding</div>
-              <div className="tl-tasks">
-                <span className="tl-task">Figma wireframes</span>
-                <span className="tl-task">Brand identity</span>
-                <span className="tl-task">Supabase setup</span>
-                <span className="tl-task">DB schema</span>
+            ) : (
+              <div className="listings-grid">
+                {listings.map(listing => (
+                  <div className="listing-card fade-up" key={listing.id}>
+                    <div className="listing-card-img">
+                      {listing.image_url
+                        ? <img src={listing.image_url} alt={listing.title} />
+                        : <span>{CATEGORY_EMOJI[listing.category || ''] || '✨'}</span>
+                      }
+                    </div>
+                    <div className="listing-card-body">
+                      <div className="listing-card-meta">
+                        {listing.category && <span className="listing-tag">{listing.category}</span>}
+                        {listing.condition && <span className="listing-tag">{listing.condition}</span>}
+                      </div>
+                      <div className="listing-card-title">{listing.title}</div>
+                      {listing.description && <div className="listing-card-desc">{listing.description}</div>}
+                      <div className="listing-card-footer">
+                        <div className="listing-card-price">{listing.price} SAR</div>
+                        {listing.size && <div className="listing-card-size">Size {listing.size}</div>}
+                      </div>
+                      {orderSuccess === listing.id ? (
+                        <div className="order-success">Order placed! The seller will contact you to arrange a meetup.</div>
+                      ) : user?.id === listing.seller_id ? (
+                        <div className="listing-own-badge">Your listing</div>
+                      ) : (
+                        <button
+                          className="btn-primary listing-buy-btn"
+                          onClick={() => handleBuyNow(listing)}
+                          disabled={buyingId === listing.id}
+                        >
+                          {buyingId === listing.id ? 'Placing order...' : 'Buy Now'}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
               </div>
-            </div>
-          </div>
-          <div className="tl-item fade-up">
-            <div>
-              <div className="tl-phase">Phase 3</div>
-              <div className="tl-time">Month 2–4</div>
-            </div>
-            <div>
-              <div className="tl-title">Build MVP</div>
-              <div className="tl-tasks">
-                <span className="tl-task">Auth & profiles</span>
-                <span className="tl-task">Listings & search</span>
-                <span className="tl-task">Escrow payments</span>
-                <span className="tl-task">Shipping integration</span>
-                <span className="tl-task">In-app messaging</span>
-              </div>
-            </div>
-          </div>
-          <div className="tl-item fade-up">
-            <div>
-              <div className="tl-phase">Phase 4</div>
-              <div className="tl-time">Month 4–5</div>
-            </div>
-            <div>
-              <div className="tl-title">Beta & legal</div>
-              <div className="tl-tasks">
-                <span className="tl-task">50–100 Riyadh beta users</span>
-                <span className="tl-task">Commercial Registration</span>
-                <span className="tl-task">App Store submission</span>
-              </div>
-            </div>
-          </div>
-          <div className="tl-item fade-up">
-            <div>
-              <div className="tl-phase">Phase 5</div>
-              <div className="tl-time">Month 5–6</div>
-            </div>
-            <div>
-              <div className="tl-title">Public launch</div>
-              <div className="tl-tasks">
-                <span className="tl-task">TikTok & Instagram push</span>
-                <span className="tl-task">Seed listings</span>
-                <span className="tl-task">Vintique goes live 🚀</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
+            )}
+          </section>
 
-      {/* FOUNDER */}
-      <section className="founder">
-        <div>
-          <p className="founder-quote">
-            "Saudi Arabia has a generation of young people with closets full of clothes they don't wear. They want to sell. They want to buy. There's just nowhere to do it safely. That's Vintique."
-          </p>
-          <div className="founder-name">Musab Alshehri</div>
-          <div className="founder-title">Architecture Student · KSU · Solo Builder</div>
-          <div style={{ marginTop: '1.2rem' }}>
-            <a href="https://www.linkedin.com/in/thegrinder/" target="_blank" rel="noreferrer" className="linkedin-btn">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 01-2.063-2.065 2.064 2.064 0 112.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
-              </svg>
-              LinkedIn
-            </a>
+          {/* STATS */}
+          <div className="stats">
+            <div className="stat fade-up"><div className="stat-num">0<span className="stat-accent">*</span></div><div className="stat-label">Direct competitors in KSA</div></div>
+            <div className="stat fade-up" style={{ transitionDelay: '0.1s' }}><div className="stat-num">35<span className="stat-accent">M+</span></div><div className="stat-label">KSA population, 70% under 35</div></div>
+            <div className="stat fade-up" style={{ transitionDelay: '0.2s' }}><div className="stat-num">10<span className="stat-accent">%</span></div><div className="stat-label">Commission per transaction</div></div>
+            <div className="stat fade-up" style={{ transitionDelay: '0.3s' }}><div className="stat-num">{listings.length}<span className="stat-accent">+</span></div><div className="stat-label">Items listed so far</div></div>
           </div>
-        </div>
-        <div className="founder-right">
-          <div className="founder-stat">
-            <div className="founder-stat-num">~0 SAR</div>
-            <div className="founder-stat-label">Build cost — self-developed on Supabase</div>
-          </div>
-          <div className="founder-stat">
-            <div className="founder-stat-num">5–6 mo.</div>
-            <div className="founder-stat-label">Time to MVP launch</div>
-          </div>
-          <div className="founder-stat">
-            <div className="founder-stat-num">10%</div>
-            <div className="founder-stat-label">Commission per sale — only revenue when users succeed</div>
-          </div>
-          <div className="founder-stat">
-            <div className="founder-stat-num">0</div>
-            <div className="founder-stat-label">Direct competitors in the KSA P2P fashion space today</div>
-          </div>
-        </div>
-      </section>
 
-      {/* CTA */}
-      <section className="cta-section" id="contact">
-        <div className="cta-bg-text">VINTIQUE</div>
-        <div className="cta-eyebrow">Join the movement</div>
-        <h2 className="cta-title">The window<br/>is <em>open.</em></h2>
-        <p className="cta-desc">
-          Vintique is looking for support — academic, financial, or mentorship — to bring Saudi Arabia's first P2P fashion resale marketplace to life.
-        </p>
-        <div className="cta-btns">
-          <a href="mailto:srtmusab@gmail.com" className="btn-primary">Email us</a>
-          <a href="tel:+966501176376" className="btn-ghost">+966 50 117 6376</a>
-        </div>
-      </section>
+          {/* HOW IT WORKS */}
+          <section className="section" id="how">
+            <div className="section-eyebrow">The flow</div>
+            <h2 className="section-title">How <em>Vintique</em> works</h2>
+            <div className="steps">
+              <div className="step fade-up"><div className="step-num">01</div><div className="step-icon">📸</div><div className="step-title">List in 2 minutes</div><div className="step-desc">Snap photos, set your price, pick size and condition. Your item is live instantly.</div></div>
+              <div className="step fade-up" style={{ transitionDelay: '0.1s' }}><div className="step-num">02</div><div className="step-icon">💳</div><div className="step-title">Buyer pays securely</div><div className="step-desc">Payment via MADA, Apple Pay or Visa — held in escrow by Vintique until delivery confirmed.</div></div>
+              <div className="step fade-up" style={{ transitionDelay: '0.2s' }}><div className="step-num">03</div><div className="step-icon">📦</div><div className="step-title">Seller ships via Aramex</div><div className="step-desc">Generate a shipping label in-app. Book a home pickup. No trips to the post office.</div></div>
+              <div className="step fade-up" style={{ transitionDelay: '0.3s' }}><div className="step-num">04</div><div className="step-icon">💰</div><div className="step-title">Get paid</div><div className="step-desc">Buyer confirms delivery. Funds released to your Vintique wallet, transferred to your bank in 1-3 days.</div></div>
+            </div>
+          </section>
 
-      {/* FOOTER */}
-      <footer>
-        <div className="footer-logo">Vintique</div>
-        <div className="footer-tagline">Vintage · Antique · Unique</div>
-        <div className="footer-copy">© 2026 Vintique. Saudi Arabia.</div>
-      </footer>
+          {/* CTA */}
+          <section className="cta-section" id="contact">
+            <div className="cta-bg-text">VINTIQUE</div>
+            <div className="cta-eyebrow">Join the movement</div>
+            <h2 className="cta-title">The window<br/>is <em>open.</em></h2>
+            <p className="cta-desc">Start buying and selling pre-loved fashion in Saudi Arabia today.</p>
+            <div className="cta-btns">
+              <button className="btn-primary" onClick={() => openView('sell')}>Sell an item</button>
+              <button className="btn-ghost" onClick={() => { document.getElementById('listings-section')?.scrollIntoView({ behavior: 'smooth' }); }}>Browse listings</button>
+            </div>
+          </section>
+
+          {/* FOOTER */}
+          <footer>
+            <div className="footer-logo">Vintique</div>
+            <div className="footer-tagline">Vintage · Antique · Unique</div>
+            <div className="footer-copy">© 2026 Vintique. Saudi Arabia.</div>
+          </footer>
+        </>
+      )}
+
+      {/* ─── SELL VIEW ─── */}
+      {view === 'sell' && (
+        <div className="page-view">
+          <div className="page-header">
+            <div className="section-eyebrow">Marketplace</div>
+            <h1 className="page-title">List an <em>item</em></h1>
+            <p className="page-desc">Fill in the details below and your item goes live instantly.</p>
+          </div>
+          <div className="form-container">
+            {sellSuccess && (
+              <div className="form-success">
+                Your listing is live! <button onClick={() => setView('home')} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', textDecoration: 'underline' }}>Browse all listings</button>
+              </div>
+            )}
+            <form onSubmit={handleSell} className="sell-form">
+              <div className="form-group">
+                <label className="form-label">Title *</label>
+                <input className="form-input" type="text" placeholder="e.g. Vintage Abaya — Zara, Like New" value={sellTitle} onChange={e => setSellTitle(e.target.value)} required />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Description</label>
+                <textarea className="form-input form-textarea" placeholder="Describe the item — brand, fabric, any flaws..." value={sellDesc} onChange={e => setSellDesc(e.target.value)} rows={4} />
+              </div>
+              <div className="form-row">
+                <div className="form-group">
+                  <label className="form-label">Category</label>
+                  <select className="form-input form-select" value={sellCategory} onChange={e => setSellCategory(e.target.value)}>
+                    <option value="">Select category</option>
+                    {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Condition</label>
+                  <select className="form-input form-select" value={sellCondition} onChange={e => setSellCondition(e.target.value)}>
+                    <option value="">Select condition</option>
+                    {CONDITIONS.map(c => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                </div>
+              </div>
+              <div className="form-row">
+                <div className="form-group">
+                  <label className="form-label">Size</label>
+                  <input className="form-input" type="text" placeholder="e.g. M, 38, One Size" value={sellSize} onChange={e => setSellSize(e.target.value)} />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Price (SAR) *</label>
+                  <input className="form-input" type="number" placeholder="e.g. 120" min="1" step="1" value={sellPrice} onChange={e => setSellPrice(e.target.value)} required />
+                </div>
+              </div>
+              {sellError && <div className="form-error">{sellError}</div>}
+              <button className="btn-primary" type="submit" disabled={sellLoading} style={{ width: '100%', padding: '1.1rem' }}>
+                {sellLoading ? 'Publishing...' : 'Publish Listing'}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ─── PROFILE VIEW ─── */}
+      {view === 'profile' && (
+        <div className="page-view">
+          <div className="page-header">
+            <div className="section-eyebrow">Account</div>
+            <h1 className="page-title">My <em>listings</em></h1>
+            <p className="page-desc">{user?.email}</p>
+          </div>
+
+          <div className="profile-actions">
+            <button className="btn-primary" onClick={() => setView('sell')}>+ New Listing</button>
+          </div>
+
+          {listingsLoading ? (
+            <div className="listings-loading" style={{ padding: '3rem' }}>Loading...</div>
+          ) : userListings.length === 0 ? (
+            <div className="listings-empty" style={{ padding: '4rem 2rem' }}>
+              <div className="listings-empty-icon">👗</div>
+              <div className="listings-empty-title">No listings yet</div>
+              <div className="listings-empty-desc">You haven't listed anything yet. Start selling!</div>
+              <button className="btn-primary" style={{ marginTop: '1.5rem' }} onClick={() => setView('sell')}>List an item</button>
+            </div>
+          ) : (
+            <div className="listings-grid" style={{ padding: '0 3rem 5rem' }}>
+              {userListings.map(listing => (
+                <div className="listing-card" key={listing.id}>
+                  <div className="listing-card-img">
+                    {listing.image_url
+                      ? <img src={listing.image_url} alt={listing.title} />
+                      : <span>{CATEGORY_EMOJI[listing.category || ''] || '✨'}</span>
+                    }
+                  </div>
+                  <div className="listing-card-body">
+                    <div className="listing-card-meta">
+                      {listing.category && <span className="listing-tag">{listing.category}</span>}
+                      {listing.condition && <span className="listing-tag">{listing.condition}</span>}
+                    </div>
+                    <div className="listing-card-title">{listing.title}</div>
+                    {listing.description && <div className="listing-card-desc">{listing.description}</div>}
+                    <div className="listing-card-footer">
+                      <div className="listing-card-price">{listing.price} SAR</div>
+                      {listing.size && <div className="listing-card-size">Size {listing.size}</div>}
+                    </div>
+                    <div className="listing-own-badge">Your listing</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </>
   );
 }
